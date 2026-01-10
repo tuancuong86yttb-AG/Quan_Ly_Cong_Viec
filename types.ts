@@ -28,5 +28,24 @@ export interface SubTask {
   completed: boolean;
 }
 
-export type ViewType = 'board' | 'list' | 'dashboard' | 'calendar';
+export interface HistoryEntry {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  action: 'create' | 'delete' | 'complete' | 'status_change';
+  timestamp: string;
+  details?: string;
+}
+
+export interface AppNotification {
+  id: string;
+  taskId: string;
+  title: string;
+  message: string;
+  type: 'overdue' | 'due_soon' | 'system';
+  timestamp: string;
+  isRead: boolean;
+}
+
+export type ViewType = 'board' | 'list' | 'dashboard' | 'calendar' | 'history';
 export type Theme = 'light' | 'dark';
