@@ -3,7 +3,7 @@ import { Priority, Task } from "../types";
 
 // The API key is obtained exclusively from process.env.API_KEY.
 // We use a function to create a new instance right before the API call as per guidelines.
-const getAIClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getAIClient = () => new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 export const suggestTasks = async (topic: string): Promise<Partial<Task>[]> => {
   try {
