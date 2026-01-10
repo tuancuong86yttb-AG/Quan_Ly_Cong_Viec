@@ -28,5 +28,5 @@ export interface SubTask {
   completed: boolean;
 }
 
-export type ViewType = 'board' | 'list' | 'dashboard';
+export type ViewType = 'board' | 'list' | 'dashboard' | 'calendar';
 export type Theme = 'light' | 'dark';

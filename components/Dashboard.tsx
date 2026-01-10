@@ -7,9 +7,12 @@ interface DashboardProps {
   tasks: Task[];
 }
 
-const COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444'];
-
 const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
+  // Use CSS variable value for charts
+  const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--p-color').trim() || '#6366f1';
+  
+  const COLORS = [primaryColor, '#f59e0b', '#10b981', '#ef4444'];
+
   const statusData = useMemo(() => {
     return Object.values(Status).map(status => ({
       name: status,
@@ -38,7 +41,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-6">
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm transition-colors">
           <p className="text-[10px] md:text-sm font-medium text-slate-500 dark:text-slate-400">Tổng việc</p>
-          <h2 className="text-xl md:text-3xl font-bold text-slate-800 dark:text-slate-100">{stats.total}</h2>
+          <h2 className="text-xl md:text-3xl font-bold">{stats.total}</h2>
         </div>
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm transition-colors">
           <p className="text-[10px] md:text-sm font-medium text-slate-500 dark:text-slate-400">Hoàn thành</p>
@@ -46,7 +49,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
         </div>
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm transition-colors">
           <p className="text-[10px] md:text-sm font-medium text-slate-500 dark:text-slate-400">Tỷ lệ %</p>
-          <h2 className="text-xl md:text-3xl font-bold text-indigo-600 dark:text-indigo-400">{stats.completionRate}%</h2>
+          <h2 className="text-xl md:text-3xl font-bold text-primary">{stats.completionRate}%</h2>
         </div>
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm transition-colors">
           <p className="text-[10px] md:text-sm font-medium text-slate-500 dark:text-slate-400">Ưu tiên cao</p>
@@ -56,7 +59,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm h-72 md:h-80 transition-colors">
-          <h3 className="text-sm md:text-lg font-semibold mb-4 md:mb-6 dark:text-slate-100">Trạng thái</h3>
+          <h3 className="text-sm md:text-lg font-semibold mb-4 md:mb-6">Trạng thái</h3>
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
@@ -82,7 +85,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
         </div>
 
         <div className="bg-white dark:bg-slate-800 p-4 md:p-6 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm h-72 md:h-80 transition-colors">
-          <h3 className="text-sm md:text-lg font-semibold mb-4 md:mb-6 dark:text-slate-100">Ưu tiên</h3>
+          <h3 className="text-sm md:text-lg font-semibold mb-4 md:mb-6">Ưu tiên</h3>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={priorityData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
               <XAxis dataKey="name" stroke="#94a3b8" fontSize={10} />
@@ -91,7 +94,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
                 contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px', color: '#f8fafc', fontSize: '12px' }}
                 itemStyle={{ color: '#f8fafc' }}
               />
-              <Bar dataKey="count" fill="#6366f1" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="count" fill={primaryColor} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>

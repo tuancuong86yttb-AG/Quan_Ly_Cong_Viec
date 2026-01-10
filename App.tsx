@@ -1,11 +1,20 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Task, ViewType, Status, Priority, SubTask, Theme } from './types';
 import Sidebar from './components/Sidebar';
 import TaskCard from './components/TaskCard';
 import Dashboard from './components/Dashboard';
-import { CATEGORIES } from './constants';
-import { suggestTasks, decomposeTask } from './services/geminiService';
+import CalendarView from './components/CalendarView';
+
+interface Toast {
+  id: string;
+  message: string;
+  type: 'success' | 'info' | 'error';
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
+}
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>(() => {
@@ -17,13 +26,24 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('theme');
     return (saved as Theme) || 'light';
   });
+  const [accentColor, setAccentColor] = useState<string>(() => {
+    return localStorage.getItem('accentColor') || '#6366f1';
+  });
+  
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [isAISuggestModalOpen, setIsAISuggestModalOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [dragOverStatus, setDragOverStatus] = useState<Status | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isAddBtnPopping, setIsAddBtnPopping] = useState(false);
+  
+  // Sync States
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [syncPreviewTasks, setSyncPreviewTasks] = useState<Task[] | null>(null);
+  const [lastBackup, setLastBackup] = useState<string | null>(localStorage.getItem('lastBackup'));
+  const [tasksBeforeSync, setTasksBeforeSync] = useState<Task[] | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localStorage.setItem('tasks', JSON.stringify(tasks));
@@ -33,8 +53,123 @@ const App: React.FC = () => {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
+  // Sync Accent Color to CSS Variables
+  useEffect(() => {
+    localStorage.setItem('accentColor', accentColor);
+    document.documentElement.style.setProperty('--p-color', accentColor);
+    const r = parseInt(accentColor.slice(1, 3), 16);
+    const g = parseInt(accentColor.slice(3, 5), 16);
+    const b = parseInt(accentColor.slice(5, 7), 16);
+    document.documentElement.style.setProperty('--p-color-soft', `rgba(${r}, ${g}, ${b}, 0.1)`);
+    document.documentElement.style.setProperty('--p-color-rgb', `${r}, ${g}, ${b}`);
+  }, [accentColor]);
+
+  const addToast = (message: string, type: 'success' | 'info' | 'error' = 'success', action?: { label: string; onClick: () => void }) => {
+    const id = crypto.randomUUID();
+    setToasts(prev => [...prev, { id, message, type, action }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
   const toggleTheme = () => {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
+  };
+
+  const handleExportData = () => {
+    try {
+      const dataStr = JSON.stringify(tasks, null, 2);
+      const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+      const now = new Date();
+      const exportFileDefaultName = `taskmaster_backup_${now.toISOString().split('T')[0]}.json`;
+
+      const linkElement = document.createElement('a');
+      linkElement.setAttribute('href', dataUri);
+      linkElement.setAttribute('download', exportFileDefaultName);
+      linkElement.click();
+      
+      const timeStr = now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+      localStorage.setItem('lastBackup', timeStr);
+      setLastBackup(timeStr);
+      addToast('Đã xuất file sao lưu thành công!');
+    } catch (e) {
+      addToast('Lỗi khi xuất dữ liệu', 'error');
+    }
+  };
+
+  const handleImportFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const importedTasks = JSON.parse(e.target?.result as string) as Task[];
+        if (!Array.isArray(importedTasks)) throw new Error('Định dạng file không hợp lệ');
+        setSyncPreviewTasks(importedTasks);
+      } catch (err) {
+        addToast('File không đúng định dạng TaskMaster JSON', 'error');
+      }
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const handleSyncFromCode = (code: string) => {
+    try {
+      const decodedData = atob(code);
+      const importedTasks = JSON.parse(decodedData) as Task[];
+      if (!Array.isArray(importedTasks)) throw new Error();
+      setSyncPreviewTasks(importedTasks);
+      setIsSyncModalOpen(false);
+    } catch (e) {
+      addToast('Mã đồng bộ không hợp lệ', 'error');
+    }
+  };
+
+  const handleUndoSync = () => {
+    if (tasksBeforeSync) {
+      setTasks(tasksBeforeSync);
+      setTasksBeforeSync(null);
+      addToast('Đã hoàn tác các thay đổi đồng bộ', 'info');
+    }
+  };
+
+  const confirmSync = (selectedIds: Set<string>, mode: 'merge' | 'replace') => {
+    if (!syncPreviewTasks) return;
+    setTasksBeforeSync([...tasks]);
+
+    let updatedCount = 0;
+    let addedCount = 0;
+
+    const tasksToImport = syncPreviewTasks.filter(t => selectedIds.has(t.id));
+
+    if (mode === 'replace') {
+      setTasks(tasksToImport);
+      addedCount = tasksToImport.length;
+    } else {
+      setTasks(prevTasks => {
+        const newTasks = [...prevTasks];
+        tasksToImport.forEach(impTask => {
+          const existingIndex = newTasks.findIndex(t => t.id === impTask.id);
+          if (existingIndex !== -1) {
+            newTasks[existingIndex] = impTask;
+            updatedCount++;
+          } else {
+            newTasks.unshift(impTask);
+            addedCount++;
+          }
+        });
+        return newTasks;
+      });
+    }
+
+    addToast(
+      mode === 'replace' ? 'Đã ghi đè toàn bộ dữ liệu' : `Đồng bộ xong: +${addedCount} mới, ~${updatedCount} cập nhật`, 
+      'success', 
+      { label: 'Hoàn tác', onClick: handleUndoSync }
+    );
+    setSyncPreviewTasks(null);
   };
 
   const triggerAddAction = () => {
@@ -51,12 +186,14 @@ const App: React.FC = () => {
     };
     setTasks(prev => [newTask, ...prev]);
     setIsFormOpen(false);
+    addToast('Đã thêm nhiệm vụ mới');
   };
 
   const handleUpdateTask = (updatedTask: Task) => {
     setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
     setEditingTask(null);
     setIsFormOpen(false);
+    addToast('Đã cập nhật nhiệm vụ');
   };
 
   const handleCycleStatus = (taskId: string) => {
@@ -75,22 +212,7 @@ const App: React.FC = () => {
   const handleDeleteTask = (id: string, skipConfirm: boolean = true) => {
     if (skipConfirm || confirm('Bạn có chắc chắn muốn xóa nhiệm vụ này không?')) {
       setTasks(prev => prev.filter(t => t.id !== id));
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent, status: Status) => {
-    e.preventDefault();
-    setDragOverStatus(status);
-  };
-
-  const handleDrop = (e: React.DragEvent, status: Status) => {
-    e.preventDefault();
-    setDragOverStatus(null);
-    setIsDragging(false);
-    const taskId = e.dataTransfer.getData('taskId');
-    const task = tasks.find(t => t.id === taskId);
-    if (task && task.status !== status) {
-      handleUpdateTask({ ...task, status });
+      addToast('Đã xóa nhiệm vụ', 'info');
     }
   };
 
@@ -101,32 +223,33 @@ const App: React.FC = () => {
 
   return (
     <div className={theme === 'dark' ? 'dark' : ''}>
-      <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950 transition-colors duration-300">
+      <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950 transition-colors duration-300 text-slate-800 dark:text-slate-100">
         <Sidebar 
           currentView={view} 
           setView={setView} 
           theme={theme} 
-          toggleTheme={toggleTheme} 
+          toggleTheme={toggleTheme}
+          accentColor={accentColor}
+          setAccentColor={setAccentColor}
+          onExport={handleExportData}
+          onImport={() => fileInputRef.current?.click()}
+          onOpenSync={() => setIsSyncModalOpen(true)}
+          lastBackup={lastBackup}
         />
         
+        <input type="file" ref={fileInputRef} onChange={handleImportFileSelect} className="hidden" accept=".json" />
+
         <main className={`flex-1 flex flex-col min-w-0 h-full overflow-hidden relative transition-all duration-500 pb-16 md:pb-0 ${isDragging ? 'bg-slate-200/50 dark:bg-slate-900/50' : ''}`}>
-          {/* Header */}
           <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 md:px-8 py-4 flex flex-col md:flex-row items-center justify-between sticky top-0 z-10 transition-colors gap-4">
             <div className="flex items-center justify-between w-full md:w-auto gap-4">
-              <h2 className="text-lg md:text-xl font-bold text-slate-800 dark:text-slate-100 truncate">
-                {view === 'board' ? 'Bảng Kanban' : view === 'list' ? 'Danh sách' : 'Thống kê'}
+              <h2 className="text-lg md:text-xl font-bold truncate">
+                {view === 'board' ? 'Bảng Kanban' : view === 'list' ? 'Danh sách' : view === 'calendar' ? 'Lịch trình' : 'Thống kê'}
               </h2>
               <div className="flex gap-2">
                 <button 
-                  onClick={() => setIsAISuggestModalOpen(true)}
-                  className="md:hidden p-2 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded-lg text-sm transition-all"
-                  title="Gợi ý bởi AI"
-                >
-                  ✨
-                </button>
-                <button 
                   onClick={triggerAddAction}
-                  className={`md:hidden px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap transition-transform ${isAddBtnPopping ? 'animate-pop' : ''}`}
+                  style={{ backgroundColor: accentColor }}
+                  className={`md:hidden px-3 py-1.5 text-white rounded-lg text-xs font-bold shadow-sm whitespace-nowrap transition-transform hover:brightness-110 ${isAddBtnPopping ? 'animate-pop' : ''}`}
                 >
                   + Nhiệm vụ
                 </button>
@@ -139,52 +262,32 @@ const App: React.FC = () => {
                 <input 
                   type="text" 
                   placeholder="Tìm nhiệm vụ..." 
-                  className="w-full bg-slate-100 dark:bg-slate-800 border-none rounded-lg pl-9 pr-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 dark:text-slate-100 dark:placeholder-slate-500 outline-none transition-all"
+                  className="w-full bg-slate-100 dark:bg-slate-800 border-none rounded-lg pl-9 pr-4 py-2 text-sm focus:ring-2 focus:ring-primary dark:text-slate-100 dark:placeholder-slate-500 outline-none transition-all"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
               <button 
-                onClick={() => setIsAISuggestModalOpen(true)}
-                className="hidden md:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:from-indigo-600 hover:to-purple-600 transition-all shadow-md active:scale-95"
-              >
-                <span>✨ Gợi ý AI</span>
-              </button>
-              <button 
                 onClick={triggerAddAction}
-                className={`hidden md:block px-4 py-2 bg-slate-800 dark:bg-slate-700 text-white rounded-lg text-sm font-medium hover:bg-slate-900 dark:hover:bg-slate-600 transition-colors shadow-sm ${isAddBtnPopping ? 'animate-pop' : ''}`}
+                style={{ backgroundColor: accentColor }}
+                className={`hidden md:block px-4 py-2 text-white rounded-lg text-sm font-medium hover:brightness-110 transition-all shadow-sm ${isAddBtnPopping ? 'animate-pop' : ''}`}
               >
                 + Thêm nhiệm vụ
               </button>
             </div>
           </header>
 
-          {/* Content Area */}
           <div className="flex-1 overflow-y-auto p-4 md:p-8">
             {view === 'board' && (
               <div className="flex md:grid md:grid-cols-3 gap-4 md:gap-8 h-full overflow-x-auto md:overflow-x-visible pb-4 md:pb-0 snap-x snap-mandatory">
                 {Object.values(Status).map(status => (
-                  <div 
-                    key={status} 
-                    className="flex flex-col gap-4 min-w-[280px] md:min-w-0 snap-center"
-                    onDragOver={(e) => handleDragOver(e, status)}
-                    onDragLeave={() => setDragOverStatus(null)}
-                    onDrop={(e) => handleDrop(e, status)}
-                  >
+                  <div key={status} className="flex flex-col gap-4 min-w-[280px] md:min-w-0 snap-center">
                     <div className="flex items-center justify-between px-2">
-                      <h3 className={`text-xs font-bold uppercase tracking-wider transition-colors duration-300 ${dragOverStatus === status ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                         {status} ({filteredTasks.filter(t => t.status === status).length})
                       </h3>
                     </div>
-                    <div className={`flex-1 rounded-2xl p-3 md:p-4 border transition-all duration-300 space-y-4 min-h-[400px] relative overflow-hidden ${
-                      dragOverStatus === status 
-                      ? 'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-400 dark:border-indigo-500 border-dashed ring-4 ring-indigo-500/10' 
-                      : 'bg-slate-100/50 dark:bg-slate-900/50 border-slate-200/50 dark:border-slate-800'
-                    }`}>
-                      {dragOverStatus === status && (
-                        <div className="absolute inset-0 bg-indigo-500/5 pointer-events-none animate-pulse" />
-                      )}
-                      
+                    <div className="flex-1 rounded-2xl p-3 md:p-4 border bg-slate-100/50 dark:bg-slate-900/50 border-slate-200/50 dark:border-slate-800 space-y-4 min-h-[400px]">
                       {filteredTasks.filter(t => t.status === status).map(task => (
                         <TaskCard 
                           key={task.id} 
@@ -192,81 +295,58 @@ const App: React.FC = () => {
                           onEdit={(t) => { setEditingTask(t); setIsFormOpen(true); }}
                           onDelete={(id) => handleDeleteTask(id, true)}
                           onCycleStatus={handleCycleStatus}
-                          onDragStartGlobal={() => setIsDragging(true)}
-                          onDragEndGlobal={() => {
-                            setIsDragging(false);
-                            setDragOverStatus(null);
-                          }}
                         />
                       ))}
-                      {filteredTasks.filter(t => t.status === status).length === 0 && (
-                        <div className={`h-24 flex items-center justify-center border-2 border-dashed rounded-xl text-[10px] transition-colors duration-300 ${
-                          dragOverStatus === status 
-                          ? 'border-indigo-400 text-indigo-500' 
-                          : 'border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-600'
-                        }`}>
-                          Trống
-                        </div>
-                      )}
                     </div>
                   </div>
                 ))}
               </div>
             )}
-
+            {view === 'calendar' && <CalendarView tasks={filteredTasks} onEditTask={(t) => { setEditingTask(t); setIsFormOpen(true); }} />}
+            {view === 'dashboard' && <Dashboard tasks={tasks} />}
             {view === 'list' && (
-              <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-x-auto shadow-sm animate-in slide-in-from-bottom-4 duration-500 transition-colors">
+               <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-x-auto shadow-sm">
                 <table className="w-full text-left min-w-[600px]">
                   <thead className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800">
                     <tr>
-                      <th className="px-4 md:px-6 py-4 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">Nhiệm vụ</th>
-                      <th className="px-4 md:px-6 py-4 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">Trạng thái</th>
-                      <th className="px-4 md:px-6 py-4 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">Ưu tiên</th>
-                      <th className="px-4 md:px-6 py-4 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase text-right">Hành động</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nhiệm vụ</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Hành động</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {filteredTasks.map(task => (
                       <tr key={task.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors">
-                        <td className="px-4 md:px-6 py-4">
-                          <div className="font-medium text-slate-800 dark:text-slate-100 text-sm">{task.title}</div>
-                          <div className="text-[10px] text-slate-400 dark:text-slate-500">{task.dueDate} • {task.category}</div>
-                        </td>
-                        <td className="px-4 md:px-6 py-4">
-                          <button 
-                            onClick={() => handleCycleStatus(task.id)}
-                            className={`px-2 py-1 rounded-full text-[9px] font-bold uppercase transition-all active:scale-90 flex items-center gap-1 ${
-                              task.status === Status.DONE ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400' :
-                              task.status === Status.IN_PROGRESS ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-400'
-                            }`}
-                          >
-                            {task.status} 🔄
-                          </button>
-                        </td>
-                        <td className="px-4 md:px-6 py-4">
-                          <span className={`px-2 py-1 rounded-full text-[9px] font-bold uppercase ${
-                            task.priority === Priority.HIGH ? 'text-red-600 dark:text-red-400' :
-                            task.priority === Priority.MEDIUM ? 'text-yellow-600 dark:text-yellow-400' : 'text-blue-600 dark:text-blue-400'
-                          }`}>
-                            {task.priority}
-                          </span>
-                        </td>
-                        <td className="px-4 md:px-6 py-4 text-right space-x-2">
-                          <button onClick={() => { setEditingTask(task); setIsFormOpen(true); }} className="text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400">✏️</button>
-                          <button onClick={() => handleDeleteTask(task.id, false)} className="text-slate-400 hover:text-red-600 dark:hover:text-red-400">🗑️</button>
+                        <td className="px-6 py-4 font-medium text-sm">{task.title}</td>
+                        <td className="px-6 py-4 text-right space-x-2">
+                          <button onClick={() => { setEditingTask(task); setIsFormOpen(true); }}>✏️</button>
+                          <button onClick={() => handleDeleteTask(task.id, false)}>🗑️</button>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
+               </div>
             )}
-
-            {view === 'dashboard' && <Dashboard tasks={tasks} />}
           </div>
         </main>
 
-        {/* Task Form Modal */}
+        {isSyncModalOpen && (
+          <SyncHubModal 
+            tasks={tasks}
+            onClose={() => setIsSyncModalOpen(false)}
+            onImport={handleSyncFromCode}
+          />
+        )}
+
+        {syncPreviewTasks && (
+          <SyncPreviewModal 
+            previewTasks={syncPreviewTasks}
+            existingTasks={tasks}
+            onConfirm={confirmSync}
+            onClose={() => setSyncPreviewTasks(null)}
+          />
+        )}
+
         {isFormOpen && (
           <TaskForm 
             task={editingTask} 
@@ -275,100 +355,225 @@ const App: React.FC = () => {
           />
         )}
 
-        {/* AI Suggestion Modal */}
-        {isAISuggestModalOpen && (
-          <AISuggestionModal 
-            onClose={() => setIsAISuggestModalOpen(false)}
-            onAddTasks={(suggestedTasks) => {
-              const formattedTasks: Task[] = suggestedTasks.map(t => ({
-                id: crypto.randomUUID(),
-                title: t.title || 'Nhiệm vụ mới',
-                description: t.description || '',
-                priority: t.priority as Priority || Priority.MEDIUM,
-                category: t.category || 'Công việc',
-                status: Status.TODO,
-                dueDate: new Date().toISOString().split('T')[0],
-                subtasks: []
-              }));
-              setTasks(prev => [...formattedTasks, ...prev]);
-              setIsAISuggestModalOpen(false);
-            }}
-          />
-        )}
+        <div className="fixed bottom-20 md:bottom-6 right-6 z-[100] flex flex-col gap-2">
+          {toasts.map(toast => (
+            <div 
+              key={toast.id}
+              className={`px-4 py-3 rounded-xl shadow-lg text-white text-sm font-medium animate-in slide-in-from-right-full duration-300 flex items-center justify-between gap-4 ${
+                toast.type === 'error' ? 'bg-red-500' : toast.type === 'info' ? 'bg-slate-800' : 'bg-primary'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span>{toast.type === 'error' ? '❌' : toast.type === 'info' ? 'ℹ️' : '✅'}</span>
+                {toast.message}
+              </div>
+              {toast.action && (
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toast.action?.onClick();
+                    setToasts(prev => prev.filter(t => t.id !== toast.id));
+                  }}
+                  className="bg-white/20 hover:bg-white/30 px-2 py-1 rounded text-[10px] font-bold uppercase transition-colors"
+                >
+                  {toast.action.label}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
 };
 
-interface AISuggestionModalProps {
+// --- Sync Components ---
+
+interface SyncHubModalProps {
+  tasks: Task[];
   onClose: () => void;
-  onAddTasks: (tasks: Partial<Task>[]) => void;
+  onImport: (code: string) => void;
 }
 
-const AISuggestionModal: React.FC<AISuggestionModalProps> = ({ onClose, onAddTasks }) => {
-  const [topic, setTopic] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [suggestions, setSuggestions] = useState<Partial<Task>[]>([]);
+const SyncHubModal: React.FC<SyncHubModalProps> = ({ tasks, onClose, onImport }) => {
+  const [activeTab, setActiveTab] = useState<'send' | 'receive'>('send');
+  const [syncCode, setSyncCode] = useState('');
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [isCopying, setIsCopying] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isScanning, setIsScanning] = useState(false);
 
-  const handleSuggest = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!topic.trim()) return;
-    setLoading(true);
-    const result = await suggestTasks(topic);
-    setSuggestions(result);
-    setLoading(false);
+  useEffect(() => {
+    if (activeTab === 'send') {
+      const dataStr = btoa(JSON.stringify(tasks));
+      const url = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(dataStr)}`;
+      setQrDataUrl(url);
+    }
+  }, [activeTab, tasks]);
+
+  const handleCopyCode = () => {
+    const dataStr = btoa(JSON.stringify(tasks));
+    navigator.clipboard.writeText(dataStr);
+    setIsCopying(true);
+    setTimeout(() => setIsCopying(false), 2000);
+  };
+
+  const handleManualImport = () => {
+    if (syncCode.trim()) onImport(syncCode);
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-[70] p-4 animate-in fade-in duration-300">
-      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300 border border-slate-100 dark:border-slate-800">
-        <div className="p-6 md:p-8 space-y-6">
-          <div className="flex justify-between items-center">
-            <h3 className="text-xl font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-              <span className="text-2xl">✨</span> Gợi ý nhiệm vụ AI
-            </h3>
-            <button onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 text-2xl transition-colors">×</button>
-          </div>
+    <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md flex items-center justify-center z-[150] p-4 animate-in fade-in duration-300">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-800 flex flex-col">
+        <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+          <h3 className="text-xl font-bold dark:text-white flex items-center gap-2">
+            <span>🔄</span> Trung tâm Đồng bộ
+          </h3>
+          <button onClick={onClose} className="text-2xl text-slate-400 hover:text-slate-600 transition-colors">×</button>
+        </div>
 
-          {!suggestions.length ? (
-            <form onSubmit={handleSuggest} className="space-y-4">
-              <p className="text-sm text-slate-500 dark:text-slate-400">Nhập chủ đề bạn muốn AI lên kế hoạch giúp (ví dụ: "Học lập trình React", "Dọn dẹp nhà cửa", "Kế hoạch đi du lịch Đà Lạt").</p>
-              <input 
-                autoFocus
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none dark:text-slate-100 transition-all"
-                value={topic}
-                onChange={e => setTopic(e.target.value)}
-                placeholder="Nhập chủ đề..."
-                disabled={loading}
-              />
-              <button 
-                type="submit"
-                disabled={loading || !topic.trim()}
-                className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {loading ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Đang suy nghĩ...</> : 'Tạo kế hoạch'}
-              </button>
-            </form>
-          ) : (
-            <div className="space-y-4">
-              <div className="max-h-[300px] overflow-y-auto space-y-3 pr-2 custom-scrollbar">
-                {suggestions.map((s, i) => (
-                  <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-100 dark:border-slate-700">
-                    <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">{s.title}</h4>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2">{s.description}</p>
-                    <div className="mt-2 flex gap-2">
-                      <span className="text-[9px] font-bold px-2 py-0.5 bg-slate-200 dark:bg-slate-700 rounded text-slate-600 dark:text-slate-300">{s.category}</span>
-                      <span className="text-[9px] font-bold px-2 py-0.5 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded uppercase">{s.priority}</span>
-                    </div>
-                  </div>
-                ))}
+        <div className="flex p-2 bg-slate-100 dark:bg-slate-800 m-4 rounded-xl">
+          <button 
+            onClick={() => setActiveTab('send')}
+            className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${activeTab === 'send' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary' : 'text-slate-500'}`}
+          >
+            Gửi đi
+          </button>
+          <button 
+            onClick={() => setActiveTab('receive')}
+            className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${activeTab === 'receive' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary' : 'text-slate-500'}`}
+          >
+            Nhận về
+          </button>
+        </div>
+
+        <div className="px-6 pb-8 flex-1 overflow-y-auto">
+          {activeTab === 'send' ? (
+            <div className="text-center space-y-6">
+              <p className="text-sm text-slate-500">Quét mã QR bằng Camera của điện thoại hoặc máy tính khác để chuyển <b>{tasks.length}</b> nhiệm vụ.</p>
+              <div className="bg-white p-4 rounded-2xl inline-block border-4 border-slate-50 shadow-inner">
+                {qrDataUrl ? <img src={qrDataUrl} alt="Sync QR" className="w-48 h-48 mx-auto" /> : <div className="w-48 h-48 bg-slate-100 animate-pulse rounded-lg" />}
               </div>
-              <div className="flex gap-3">
-                <button onClick={() => setSuggestions([])} className="flex-1 py-3 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-600 dark:text-slate-400 font-medium hover:bg-slate-50 dark:hover:bg-slate-800 transition-all">Làm lại</button>
-                <button onClick={() => onAddTasks(suggestions)} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg">Thêm tất cả</button>
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Hoặc sử dụng mã</p>
+                <div className="flex gap-2">
+                  <input readOnly value={btoa(JSON.stringify(tasks)).slice(0, 15) + "..."} className="flex-1 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-4 py-2 text-[10px] text-slate-400 outline-none" />
+                  <button onClick={handleCopyCode} className="px-4 py-2 bg-primary text-white text-xs font-bold rounded-xl hover:brightness-110 transition-all">
+                    {isCopying ? 'Đã chép' : 'Sao chép'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="bg-slate-50 dark:bg-slate-800 rounded-2xl p-8 border-2 border-dashed border-slate-200 dark:border-slate-700 text-center space-y-4">
+                <div className="w-16 h-16 bg-white dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto text-2xl shadow-sm">📷</div>
+                <p className="text-sm text-slate-500">Sử dụng Camera để quét nhanh</p>
+                <button className="px-6 py-2 bg-slate-800 text-white text-xs font-bold rounded-full hover:bg-slate-950 transition-all">Mở Camera</button>
+              </div>
+
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100 dark:border-slate-800"></div></div>
+                <div className="relative flex justify-center text-[10px] uppercase font-bold text-slate-400 bg-white dark:bg-slate-900 px-2 w-max mx-auto">Hoặc dán mã</div>
+              </div>
+
+              <div className="space-y-3">
+                <textarea 
+                  placeholder="Dán mã đồng bộ vào đây..."
+                  className="w-full bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl px-4 py-3 text-xs h-24 outline-none focus:ring-2 focus:ring-primary transition-all dark:text-white"
+                  value={syncCode}
+                  onChange={(e) => setSyncCode(e.target.value)}
+                />
+                <button 
+                  onClick={handleManualImport}
+                  disabled={!syncCode.trim()}
+                  className="w-full py-4 bg-primary text-white rounded-2xl text-sm font-bold shadow-lg hover:brightness-110 disabled:opacity-50 transition-all"
+                >
+                  Bắt đầu Đồng bộ
+                </button>
               </div>
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface SyncPreviewModalProps {
+  previewTasks: Task[];
+  existingTasks: Task[];
+  onConfirm: (selectedIds: Set<string>, mode: 'merge' | 'replace') => void;
+  onClose: () => void;
+}
+
+const SyncPreviewModal: React.FC<SyncPreviewModalProps> = ({ previewTasks, existingTasks, onConfirm, onClose }) => {
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(previewTasks.map(t => t.id)));
+  const [syncMode, setSyncMode] = useState<'merge' | 'replace'>('merge');
+
+  const toggleTask = (id: string) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedIds(next);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[160] p-4">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-800 flex flex-col max-h-[85vh]">
+        <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-white dark:bg-slate-900 sticky top-0 z-10">
+          <div>
+            <h3 className="text-xl font-bold dark:text-white">Kiểm tra dữ liệu đồng bộ</h3>
+            <p className="text-xs text-slate-400">Chọn nhiệm vụ và phương thức nhập</p>
+          </div>
+          <button onClick={onClose} className="text-2xl text-slate-400">×</button>
+        </div>
+
+        <div className="p-4 bg-amber-50 dark:bg-amber-900/20 flex items-center gap-3">
+          <div className="flex bg-white dark:bg-slate-800 p-1 rounded-xl shadow-sm shrink-0 border border-amber-100 dark:border-amber-800">
+            <button onClick={() => setSyncMode('merge')} className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${syncMode === 'merge' ? 'bg-amber-500 text-white' : 'text-amber-600'}`}>Hợp nhất</button>
+            <button onClick={() => setSyncMode('replace')} className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${syncMode === 'replace' ? 'bg-red-500 text-white' : 'text-red-600'}`}>Ghi đè</button>
+          </div>
+          <p className="text-[10px] text-amber-700 dark:text-amber-300 leading-tight">
+            {syncMode === 'merge' ? 'Giữ lại các việc hiện có và thêm/cập nhật việc mới.' : 'Xóa sạch danh sách hiện tại và thay bằng dữ liệu mới này.'}
+          </p>
+        </div>
+
+        <div className="p-6 flex-1 overflow-y-auto space-y-2 bg-slate-50 dark:bg-slate-950/20">
+          {previewTasks.map(t => {
+            const isUpdate = existingTasks.some(et => et.id === t.id);
+            return (
+              <div 
+                key={t.id} 
+                onClick={() => toggleTask(t.id)}
+                className={`flex items-center gap-4 p-4 rounded-xl border cursor-pointer transition-all ${
+                  selectedIds.has(t.id) ? 'bg-primary-soft border-primary/40' : 'bg-white dark:bg-slate-900 border-transparent opacity-60'
+                }`}
+              >
+                <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedIds.has(t.id) ? 'bg-primary border-primary' : 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-700'}`}>
+                  {selectedIds.has(t.id) && <span className="text-white text-[10px]">✓</span>}
+                </div>
+                <div className="flex-1">
+                  <h4 className="text-sm font-bold dark:text-white line-clamp-1">{t.title}</h4>
+                  <p className="text-[10px] text-slate-500">{t.dueDate} • {t.category}</p>
+                </div>
+                <span className={`text-[9px] font-bold px-2 py-0.5 rounded uppercase ${isUpdate ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40'}`}>
+                  {isUpdate ? 'Cập nhật' : 'Mới'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="p-6 border-t border-slate-100 dark:border-slate-800 flex gap-4 bg-white dark:bg-slate-900">
+          <button onClick={onClose} className="flex-1 py-3 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium">Hủy bỏ</button>
+          <button 
+            onClick={() => onConfirm(selectedIds, syncMode)} 
+            disabled={selectedIds.size === 0}
+            className={`flex-[2] py-3 text-white rounded-xl text-sm font-bold disabled:opacity-50 shadow-lg transition-all ${syncMode === 'replace' ? 'bg-red-600' : 'bg-primary'}`}
+          >
+            {syncMode === 'replace' ? 'Ghi đè tất cả' : `Đồng bộ ${selectedIds.size} mục`}
+          </button>
         </div>
       </div>
     </div>
@@ -390,210 +595,70 @@ const TaskForm: React.FC<TaskFormProps> = ({ task, onSave, onClose }) => {
     dueDate: task?.dueDate || new Date().toISOString().split('T')[0],
     category: task?.category || 'Công việc',
   });
-
   const [subtasks, setSubtasks] = useState<SubTask[]>(task?.subtasks || []);
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
-  const [isDecomposing, setIsDecomposing] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSave(task ? { ...task, ...formData, subtasks } : { ...formData, subtasks });
   };
 
-  const toggleSubtask = (id: string) => {
-    setSubtasks(prev => prev.map(st => st.id === id ? { ...st, completed: !st.completed } : st));
-  };
-
-  const updateSubtaskTitle = (id: string, title: string) => {
-    setSubtasks(prev => prev.map(st => st.id === id ? { ...st, title } : st));
-  };
-
-  const removeSubtask = (id: string) => {
-    setSubtasks(prev => prev.filter(st => st.id !== id));
-  };
-
-  const addSubtask = (title?: string) => {
-    const finalTitle = title || newSubtaskTitle.trim();
-    if (!finalTitle) return;
-    const newSt: SubTask = {
-      id: crypto.randomUUID(),
-      title: finalTitle,
-      completed: false
-    };
-    setSubtasks(prev => [...prev, newSt]);
-    if (!title) setNewSubtaskTitle('');
-  };
-
-  const handleDecompose = async () => {
-    if (!formData.title.trim()) {
-      alert('Vui lòng nhập tiêu đề nhiệm vụ trước khi chia nhỏ.');
-      return;
-    }
-    setIsDecomposing(true);
-    const suggestedSubtasks = await decomposeTask(formData.title, formData.description);
-    if (suggestedSubtasks.length > 0) {
-      const newSts: SubTask[] = suggestedSubtasks.map(title => ({
-        id: crypto.randomUUID(),
-        title,
-        completed: false
-      }));
-      setSubtasks(prev => [...prev, ...newSts]);
-    }
-    setIsDecomposing(false);
-  };
-
-  const handleNewSubtaskKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      addSubtask();
-    }
+  const addSubtask = () => {
+    if (!newSubtaskTitle.trim()) return;
+    setSubtasks([...subtasks, { id: crypto.randomUUID(), title: newSubtaskTitle, completed: false }]);
+    setNewSubtaskTitle('');
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm flex items-end md:items-center justify-center z-[60] p-0 md:p-4 animate-in fade-in duration-300">
-      <div className="bg-white dark:bg-slate-900 rounded-t-3xl md:rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden animate-in slide-in-from-bottom-full md:zoom-in-95 duration-300 border border-slate-100 dark:border-slate-800 h-full max-h-[95vh] md:max-h-[90vh]">
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-end md:items-center justify-center z-[60] p-0 md:p-4 animate-in fade-in duration-300">
+      <div className="bg-white dark:bg-slate-900 rounded-t-3xl md:rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-800 h-full max-h-[95vh] md:max-h-[90vh]">
         <form onSubmit={handleSubmit} className="flex flex-col h-full">
-          {/* Sticky Header */}
-          <div className="px-6 md:px-8 py-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-white dark:bg-slate-900 sticky top-0 z-20 transition-colors shrink-0">
-            <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">{task ? 'Sửa nhiệm vụ' : 'Nhiệm vụ mới'}</h3>
-            <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 text-3xl transition-colors">×</button>
+          <div className="px-6 py-5 border-b dark:border-slate-800 flex justify-between items-center bg-white dark:bg-slate-900 shrink-0">
+            <h3 className="text-lg font-bold dark:text-white">{task ? 'Sửa nhiệm vụ' : 'Nhiệm vụ mới'}</h3>
+            <button type="button" onClick={onClose} className="text-3xl text-slate-400">×</button>
           </div>
-          
-          {/* Scrollable Content */}
-          <div className="p-6 md:p-8 space-y-5 overflow-y-auto flex-1 custom-scrollbar">
-            {/* Title */}
+          <div className="p-6 space-y-5 overflow-y-auto flex-1 custom-scrollbar">
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Tiêu đề</label>
-              <input 
-                required
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none dark:text-slate-100 dark:placeholder-slate-600 transition-all"
-                value={formData.title}
-                onChange={e => setFormData({ ...formData, title: e.target.value })}
-                placeholder="Ví dụ: Lập kế hoạch dự án..."
-              />
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Tiêu đề</label>
+              <input required className="w-full bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary outline-none dark:text-white" value={formData.title} onChange={e => setFormData({ ...formData, title: e.target.value })} />
             </div>
-
-            {/* Description */}
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Mô tả</label>
-              <textarea 
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none h-20 resize-none dark:text-slate-100 dark:placeholder-slate-600 transition-all"
-                value={formData.description}
-                onChange={e => setFormData({ ...formData, description: e.target.value })}
-                placeholder="Ghi chú thêm thông tin cho AI..."
-              />
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Mô tả</label>
+              <textarea className="w-full bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary outline-none h-20 resize-none dark:text-white" value={formData.description} onChange={e => setFormData({ ...formData, description: e.target.value })} />
             </div>
-
-            {/* Priority & Category */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Ưu tiên</label>
-                <select 
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:text-slate-100"
-                  value={formData.priority}
-                  onChange={e => setFormData({ ...formData, priority: e.target.value as Priority })}
-                >
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Ưu tiên</label>
+                <select className="w-full bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none dark:text-white focus:ring-2 focus:ring-primary" value={formData.priority} onChange={e => setFormData({ ...formData, priority: e.target.value as Priority })}>
                   {Object.values(Priority).map(p => <option key={p} value={p}>{p}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">D.Mục</label>
-                <select 
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:text-slate-100"
-                  value={formData.category}
-                  onChange={e => setFormData({ ...formData, category: e.target.value })}
-                >
-                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Hạn chót</label>
+                <input type="date" className="w-full bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none dark:text-white focus:ring-2 focus:ring-primary" value={formData.dueDate} onChange={e => setFormData({ ...formData, dueDate: e.target.value })} />
               </div>
             </div>
-
-            {/* Date & Status */}
-            <div className="grid grid-cols-2 gap-3">
-               <div>
-                <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Ngày</label>
-                <input 
-                  type="date"
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:text-slate-100"
-                  value={formData.dueDate}
-                  onChange={e => setFormData({ ...formData, dueDate: e.target.value })}
-                />
-              </div>
-              {task && (
-                 <div>
-                  <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">T.Thái</label>
-                  <select 
-                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:text-slate-100"
-                    value={formData.status}
-                    onChange={e => setFormData({ ...formData, status: e.target.value as Status })}
-                  >
-                    {Object.values(Status).map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-              )}
-            </div>
-
-            {/* Subtasks */}
             <div>
               <div className="flex items-center justify-between mb-3">
-                <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Công việc con</label>
-                <button 
-                  type="button"
-                  onClick={handleDecompose}
-                  disabled={isDecomposing || !formData.title.trim()}
-                  className="text-[10px] font-bold px-3 py-1 bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 rounded-full border border-indigo-100 dark:border-indigo-800 hover:bg-indigo-100 transition-all flex items-center gap-1 disabled:opacity-50"
-                >
-                  {isDecomposing ? <div className="w-2 h-2 border border-indigo-500 border-t-transparent rounded-full animate-spin" /> : '✨'} Chia nhỏ AI
-                </button>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Công việc con</label>
               </div>
               <div className="space-y-2 mb-4">
                 {subtasks.map(st => (
-                  <div key={st.id} className="flex items-center gap-3 bg-slate-50 dark:bg-slate-800/50 p-2 pl-3 rounded-xl border border-slate-100 dark:border-slate-700 group animate-in slide-in-from-left-2 duration-300">
-                    <input 
-                      type="checkbox" 
-                      checked={st.completed} 
-                      onChange={() => toggleSubtask(st.id)}
-                      className="w-4 h-4 rounded text-indigo-600 dark:text-indigo-400 transition-all"
-                    />
-                    <input 
-                      type="text"
-                      className={`flex-1 bg-transparent border-none outline-none text-xs transition-all ${st.completed ? 'line-through text-slate-400 dark:text-slate-600' : 'text-slate-700 dark:text-slate-200'}`}
-                      value={st.title}
-                      onChange={(e) => updateSubtaskTitle(st.id, e.target.value)}
-                    />
-                    <button type="button" onClick={() => removeSubtask(st.id)} className="p-1 hover:text-red-500 text-slate-300 transition-all">✕</button>
+                  <div key={st.id} className="flex items-center gap-3 bg-slate-50 dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700">
+                    <input type="checkbox" checked={st.completed} className="accent-primary" onChange={() => setSubtasks(subtasks.map(s => s.id === st.id ? { ...s, completed: !s.completed } : s))} />
+                    <span className={`text-xs flex-1 dark:text-white ${st.completed ? 'line-through text-slate-400' : ''}`}>{st.title}</span>
                   </div>
                 ))}
               </div>
               <div className="flex gap-2">
-                <input 
-                  type="text"
-                  className="flex-1 bg-slate-50 dark:bg-slate-800 border border-dashed border-slate-300 dark:border-slate-600 rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500 dark:text-slate-100"
-                  value={newSubtaskTitle}
-                  onChange={e => setNewSubtaskTitle(e.target.value)}
-                  onKeyDown={handleNewSubtaskKeyDown}
-                  placeholder="Thêm nhanh..."
-                />
-                <button type="button" onClick={() => addSubtask()} className="px-4 bg-slate-100 dark:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-300 font-bold">+</button>
+                <input className="flex-1 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-4 py-2 text-xs outline-none dark:text-white focus:ring-2 focus:ring-primary" value={newSubtaskTitle} onChange={e => setNewSubtaskTitle(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addSubtask())} placeholder="Thêm công việc con..." />
+                <button type="button" onClick={addSubtask} className="px-4 bg-slate-100 dark:bg-slate-700 rounded-xl dark:text-white hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">+</button>
               </div>
             </div>
           </div>
-
-          {/* Sticky Footer */}
-          <div className="p-6 md:p-8 border-t border-slate-100 dark:border-slate-800 flex gap-4 bg-white dark:bg-slate-900 sticky bottom-0 z-20 transition-colors shrink-0">
-            <button 
-              type="button" 
-              onClick={onClose}
-              className="flex-1 px-4 py-3 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-600 dark:text-slate-400 font-medium hover:bg-slate-50 dark:hover:bg-slate-800 text-sm transition-colors"
-            >
-              Hủy
-            </button>
-            <button 
-              type="submit"
-              className="flex-1 px-4 py-3 bg-indigo-600 dark:bg-indigo-500 text-white rounded-xl font-medium hover:bg-indigo-700 dark:hover:bg-indigo-600 text-sm transition-colors shadow-lg active:scale-95"
-            >
-              {task ? 'Cập nhật' : 'Lưu lại'}
-            </button>
+          <div className="p-6 border-t dark:border-slate-800 flex gap-4 bg-white dark:bg-slate-900 shrink-0">
+            <button type="button" onClick={onClose} className="flex-1 py-3 border dark:border-slate-700 rounded-xl text-sm dark:text-white hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">Hủy</button>
+            <button type="submit" className="flex-1 py-3 bg-primary text-white rounded-xl text-sm font-bold shadow-lg hover:brightness-110 transition-all">Lưu lại</button>
           </div>
         </form>
       </div>

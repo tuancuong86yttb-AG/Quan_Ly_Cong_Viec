@@ -1,5 +1,7 @@
 {
-  "name": "Gemini TaskMaster Pro",
-  "description": "A high-performance, AI-powered task management application with Kanban boards, analytics dashboards, and Gemini-driven task decomposition and suggestions.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "name": "",
+  "description": ""
 }
