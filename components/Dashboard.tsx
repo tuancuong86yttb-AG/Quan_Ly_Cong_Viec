@@ -8,6 +8,14 @@ interface DashboardProps {
   tasks: Task[];
 }
 
+// Helper to get local YYYY-MM-DD string
+const getLocalDateString = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
   const [selectedDayOffset, setSelectedDayOffset] = useState<number | null>(null);
 
@@ -48,24 +56,23 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
   }, [tasks]);
 
   const getTasksForDate = (date: Date) => {
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = getLocalDateString(date);
     return tasks.filter(t => t.dueDate === dateStr && t.status !== Status.DONE);
   };
 
   const filteredUpcomingTasks = useMemo(() => {
     if (selectedDayOffset === null) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const sevenDaysLater = new Date(today);
-      sevenDaysLater.setDate(today.getDate() + 7);
+      const todayStr = getLocalDateString(new Date());
+      const sevenDaysLater = new Date();
+      sevenDaysLater.setDate(sevenDaysLater.getDate() + 7);
+      const sevenDaysLaterStr = getLocalDateString(sevenDaysLater);
 
       return tasks
         .filter(t => {
           if (t.status === Status.DONE) return false;
-          const dueDate = new Date(t.dueDate);
-          return dueDate >= today && dueDate <= sevenDaysLater;
+          return t.dueDate >= todayStr && t.dueDate <= sevenDaysLaterStr;
         })
-        .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+        .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
     } else {
       const targetDate = next7Days[selectedDayOffset];
       return getTasksForDate(targetDate);
@@ -209,7 +216,7 @@ const Dashboard: React.FC<DashboardProps> = ({ tasks }) => {
               </div>
             ) : (
               filteredUpcomingTasks.map(task => {
-                const isToday = new Date(task.dueDate).toDateString() === new Date().toDateString();
+                const isToday = task.dueDate === getLocalDateString(new Date());
                 return (
                   <div key={task.id} className="group p-3 rounded-xl border border-slate-50 dark:border-slate-700/50 bg-slate-50/50 dark:bg-slate-900/30 hover:border-primary/30 transition-all">
                     <div className="flex items-center justify-between gap-2 mb-1.5">

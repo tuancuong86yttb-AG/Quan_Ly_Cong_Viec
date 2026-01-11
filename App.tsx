@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Task, ViewType, Status, Priority, SubTask, Theme, HistoryEntry, AppNotification } from './types';
 import Sidebar from './components/Sidebar';
 import TaskCard from './components/TaskCard';
@@ -14,11 +14,15 @@ interface Toast {
   id: string;
   message: string;
   type: 'success' | 'info' | 'error';
-  action?: {
-    label: string;
-    onClick: () => void;
-  };
 }
+
+// Helper to get local YYYY-MM-DD string
+const getLocalDateString = (date: Date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>(() => {
@@ -49,6 +53,8 @@ const App: React.FC = () => {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [quickAddValue, setQuickAddValue] = useState('');
+  const [isQuickAdding, setIsQuickAdding] = useState(false);
   
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [lastBackup, setLastBackup] = useState<string | null>(localStorage.getItem('lastBackup'));
@@ -80,11 +86,7 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('theme', theme);
     document.documentElement.classList.toggle('dark', theme === 'dark');
-    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
-    if (metaThemeColor) {
-      metaThemeColor.setAttribute('content', theme === 'dark' ? '#020617' : accentColor);
-    }
-  }, [theme, accentColor]);
+  }, [theme]);
 
   useEffect(() => {
     localStorage.setItem('accentColor', accentColor);
@@ -96,7 +98,6 @@ const App: React.FC = () => {
     document.documentElement.style.setProperty('--p-color-rgb', `${r}, ${g}, ${b}`);
   }, [accentColor]);
 
-  // Close theme menu on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
@@ -110,7 +111,7 @@ const App: React.FC = () => {
   const addToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
     const id = crypto.randomUUID();
     setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   };
 
   const addHistoryLog = (taskId: string, title: string, action: HistoryEntry['action'], details?: string) => {
@@ -123,6 +124,39 @@ const App: React.FC = () => {
       details
     };
     setHistory(prev => [newEntry, ...prev].slice(0, 100));
+  };
+
+  const handleQuickAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickAddValue.trim() || isQuickAdding) return;
+
+    setIsQuickAdding(true);
+    addToast('Gemini đang tạo nhiệm vụ...', 'info');
+
+    try {
+      const suggestions = await suggestTasks(quickAddValue);
+      if (suggestions && suggestions.length > 0) {
+        const suggestion = suggestions[0];
+        const newTask: Task = {
+          id: crypto.randomUUID(),
+          title: suggestion.title || quickAddValue,
+          description: suggestion.description || '',
+          priority: (suggestion.priority as Priority) || Priority.MEDIUM,
+          status: Status.TODO,
+          dueDate: getLocalDateString(), // Fixed timezone issue
+          subtasks: [],
+          category: suggestion.category || CATEGORIES[0]
+        };
+        setTasks(prev => [newTask, ...prev]);
+        addHistoryLog(newTask.id, newTask.title, 'create', 'Tạo nhanh bằng AI');
+        addToast('Đã thêm nhiệm vụ mới!');
+        setQuickAddValue('');
+      }
+    } catch (err) {
+      addToast('Không thể tạo nhanh, vui lòng thử lại', 'error');
+    } finally {
+      setIsQuickAdding(false);
+    }
   };
 
   const handleCycleStatus = (taskId: string) => {
@@ -161,7 +195,7 @@ const App: React.FC = () => {
   const handleDecompose = async (taskId: string) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
-    addToast('Gemini đang chia nhỏ nhiệm vụ...', 'info');
+    addToast('Đang phân tích...', 'info');
     const newSubtaskTitles = await decomposeTask(task.title, task.description);
     if (newSubtaskTitles.length > 0) {
       const newSubtasks: SubTask[] = newSubtaskTitles.map(title => ({
@@ -170,19 +204,16 @@ const App: React.FC = () => {
         completed: false
       }));
       setTasks(prev => prev.map(t => t.id === taskId ? { ...t, subtasks: [...t.subtasks, ...newSubtasks] } : t));
-      addToast(`Đã thêm ${newSubtaskTitles.length} công việc con!`);
+      addToast(`Đã thêm ${newSubtaskTitles.length} mục con!`);
     }
   };
 
   const checkOverdueTasks = () => {
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    const todayStr = getLocalDateString();
     const newNotifications: AppNotification[] = [];
     tasks.forEach(task => {
       if (task.status === Status.DONE) return;
-      const dueDate = new Date(task.dueDate);
-      dueDate.setHours(0, 0, 0, 0);
-      if (dueDate < now) {
+      if (task.dueDate < todayStr) {
         const notifId = `overdue-${task.id}-${task.dueDate}`;
         if (!notifications.some(n => n.id === notifId)) {
           newNotifications.push({ id: notifId, taskId: task.id, title: 'Quá hạn!', message: `"${task.title}" đã trễ hạn.`, type: 'overdue', timestamp: new Date().toISOString(), isRead: false });
@@ -208,64 +239,46 @@ const App: React.FC = () => {
         />
         
         <main className="flex-1 flex flex-col min-w-0 h-full overflow-hidden relative pb-[calc(76px+var(--sab))] md:pb-0">
-          <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 md:px-8 pt-4 pb-4 md:py-4 flex flex-col md:flex-row items-center justify-between sticky top-0 z-50 gap-4">
-             <div className="flex items-center justify-between w-full md:w-auto">
-              <h2 className="text-xl font-black font-display tracking-tight">
-                {view === 'board' ? 'Bảng' : view === 'list' ? 'D.Sách' : view === 'calendar' ? 'Lịch' : view === 'history' ? 'Lịch sử' : 'Báo cáo'}
+          <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 md:px-8 py-4 flex flex-col md:flex-row items-center justify-between sticky top-0 z-50 gap-4">
+            <div className="flex items-center justify-between w-full md:w-auto gap-4">
+              <h2 className="hidden lg:block text-xl font-black font-display tracking-tight shrink-0">
+                {view === 'board' ? 'Bảng Kanban' : view === 'list' ? 'Danh sách' : view === 'calendar' ? 'Lịch trình' : view === 'history' ? 'Lịch sử' : 'Thống kê'}
               </h2>
-              <div className="md:hidden flex items-center gap-2">
-                 <div className="relative" ref={themeMenuRef}>
-                    <button onClick={() => setIsThemeMenuOpen(!isThemeMenuOpen)} className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-lg">🎨</button>
-                    {isThemeMenuOpen && (
-                      <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-4 z-[60] animate-in slide-in-from-top-2">
-                        <p className="text-[10px] font-black uppercase text-slate-400 mb-3 tracking-widest font-display">Chọn màu chủ đạo</p>
-                        <div className="flex flex-wrap gap-2 mb-4">
-                          {themeColors.map(c => (
-                            <button key={c.hex} onClick={() => setAccentColor(c.hex)} className={`w-6 h-6 rounded-full transition-transform hover:scale-125 ${accentColor === c.hex ? 'ring-2 ring-offset-2 ring-slate-400' : ''}`} style={{ backgroundColor: c.hex }} />
-                          ))}
-                        </div>
-                        <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800 text-xs font-bold">
-                          <span>{theme === 'light' ? 'Giao diện tối' : 'Giao diện sáng'}</span>
-                          <span>{theme === 'light' ? '🌙' : '☀️'}</span>
-                        </button>
-                      </div>
-                    )}
-                 </div>
-                 <button onClick={() => setIsNotifOpen(!isNotifOpen)} className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 relative text-lg">
-                    <span>🔔</span>
-                    {notifications.filter(n => !n.isRead).length > 0 && <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full" />}
-                 </button>
-              </div>
+              
+              <form onSubmit={handleQuickAdd} className="flex-1 max-w-md relative group">
+                <input 
+                  type="text" 
+                  placeholder="Thêm nhanh với AI... (vd: Họp dự án 2h chiều)" 
+                  className={`w-full bg-slate-100 dark:bg-slate-800 border-2 border-transparent rounded-2xl pl-11 pr-4 py-2.5 text-xs font-bold focus:bg-white dark:focus:bg-slate-900 focus:border-primary/30 outline-none transition-all ${isQuickAdding ? 'opacity-50' : ''}`}
+                  value={quickAddValue}
+                  onChange={(e) => setQuickAddValue(e.target.value)}
+                  disabled={isQuickAdding}
+                />
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-lg">✨</span>
+                {isQuickAdding && (
+                  <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                    <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  </div>
+                )}
+              </form>
             </div>
 
-            <div className="flex items-center gap-3 w-full md:w-auto">
-              <div className="relative flex-1 min-w-[150px]">
-                <input 
-                  type="text" placeholder="Tìm kiếm..." 
-                  className="w-full bg-slate-100 dark:bg-slate-800 border-none rounded-xl pl-10 pr-4 py-2.5 text-sm focus:ring-2 focus:ring-primary outline-none transition-all"
-                  value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-                />
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 opacity-50">🔍</span>
-              </div>
-              
-              {/* Desktop Theme Customization Dropdown */}
-              <div className="hidden md:block relative" ref={themeMenuRef}>
+            <div className="flex items-center gap-2 md:gap-3 shrink-0">
+              <div className="relative" ref={themeMenuRef}>
                 <button 
                   onClick={() => setIsThemeMenuOpen(!isThemeMenuOpen)}
-                  className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors text-lg"
-                  title="Tùy chỉnh theme"
+                  className={`p-2.5 rounded-xl transition-all duration-300 ${isThemeMenuOpen ? 'bg-primary text-white scale-110 shadow-lg' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-lg'}`}
                 >
                   🎨
                 </button>
                 {isThemeMenuOpen && (
-                  <div className="absolute right-0 mt-3 w-56 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-5 z-[60] animate-in slide-in-from-top-2">
-                    <p className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest font-display">Chọn màu chủ đạo</p>
+                  <div className="absolute right-0 mt-3 w-56 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 p-5 z-[110] animate-in slide-in-from-top-2">
+                    <p className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest font-display">Màu chủ đạo</p>
                     <div className="flex flex-wrap gap-3 mb-5">
                       {themeColors.map(c => (
                         <button 
-                          key={c.hex} 
-                          onClick={() => setAccentColor(c.hex)} 
-                          className={`w-8 h-8 rounded-full transition-all hover:scale-125 active:scale-95 shadow-sm ${accentColor === c.hex ? 'ring-2 ring-offset-4 ring-slate-300 dark:ring-slate-600' : ''}`} 
+                          key={c.hex} onClick={() => setAccentColor(c.hex)} 
+                          className={`w-8 h-8 rounded-full transition-all hover:scale-125 shadow-sm ${accentColor === c.hex ? 'ring-2 ring-offset-4 ring-slate-300 dark:ring-slate-600' : ''}`} 
                           style={{ backgroundColor: c.hex }} 
                         />
                       ))}
@@ -273,29 +286,40 @@ const App: React.FC = () => {
                     <div className="h-px bg-slate-100 dark:bg-slate-800 mb-4" />
                     <button 
                       onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} 
-                      className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800 hover:brightness-95 transition-all text-xs font-black uppercase tracking-tight"
+                      className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800 text-xs font-black uppercase tracking-tight"
                     >
-                      <span>{theme === 'light' ? 'Giao diện tối' : 'Giao diện sáng'}</span>
+                      <span>{theme === 'light' ? 'Chế độ tối' : 'Chế độ sáng'}</span>
                       <span className="text-base">{theme === 'light' ? '🌙' : '☀️'}</span>
                     </button>
                   </div>
                 )}
               </div>
 
-              <button 
-                onClick={() => setIsNotifOpen(!isNotifOpen)}
-                className="hidden md:flex p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 relative hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors text-lg"
-              >
-                <span>🔔</span>
-                {notifications.filter(n => !n.isRead).length > 0 && <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full animate-ping" />}
-              </button>
+              <div className="relative">
+                <button 
+                  onClick={() => setIsNotifOpen(!isNotifOpen)}
+                  className={`p-2.5 rounded-xl transition-all relative ${isNotifOpen ? 'bg-slate-200 dark:bg-slate-700' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200'} text-lg`}
+                >
+                  <span>🔔</span>
+                  {notifications.filter(n => !n.isRead).length > 0 && <span className="absolute top-2.5 right-2.5 w-2 h-2 bg-red-500 rounded-full animate-ping" />}
+                </button>
+                {isNotifOpen && (
+                  <NotificationPanel 
+                    notifications={notifications} onClose={() => setIsNotifOpen(false)} onClearAll={() => setNotifications([])} 
+                    onMarkAsRead={(id) => setNotifications(prev => prev.map(n => n.id === id ? {...n, isRead: true} : n))} 
+                  />
+                )}
+              </div>
+
+              <div className="w-px h-8 bg-slate-200 dark:bg-slate-800 mx-1 hidden sm:block" />
 
               <button 
                 onClick={() => { setEditingTask(null); setIsFormOpen(true); }}
                 style={{ backgroundColor: accentColor }}
-                className="hidden md:block px-6 py-2.5 text-white rounded-xl text-sm font-black shadow-lg shadow-primary/30 hover:brightness-110 active:scale-95 transition-all uppercase tracking-tight"
+                className="flex items-center gap-2 px-5 py-2.5 text-white rounded-xl text-xs font-black shadow-lg shadow-primary/30 hover:brightness-110 active:scale-95 transition-all uppercase tracking-wider"
               >
-                + Thêm mới
+                <span className="text-lg leading-none">+</span>
+                <span className="hidden sm:inline">Thêm mới</span>
               </button>
             </div>
           </header>
@@ -324,7 +348,7 @@ const App: React.FC = () => {
               </div>
             )}
             {view === 'calendar' && <CalendarView tasks={filteredTasks} onEditTask={(t) => { setEditingTask(t); setIsFormOpen(true); }} />}
-            {view === 'dashboard' && <Dashboard tasks={tasks} />}
+            {view === 'dashboard' && <Dashboard tasks={filteredTasks} />}
             {view === 'history' && <HistoryView history={history} onClear={() => setHistory([])} />}
             {view === 'list' && (
               <div className="space-y-4 max-w-4xl mx-auto">
@@ -344,22 +368,32 @@ const App: React.FC = () => {
           +
         </button>
 
-        {isFormOpen && <TaskForm task={editingTask} onSave={(data) => { if(editingTask) { setTasks(prev => prev.map(t => t.id === editingTask.id ? {...editingTask, ...data} : t)); addToast('Cập nhật thành công'); } else { const newTask = {...data, id: crypto.randomUUID(), subtasks: []}; setTasks(prev => [newTask, ...prev]); addToast('Đã thêm nhiệm vụ'); addHistoryLog(newTask.id, newTask.title, 'create'); } setIsFormOpen(false); }} onClose={() => setIsFormOpen(false)} />}
+        {isFormOpen && (
+          <TaskForm 
+            task={editingTask} 
+            onSave={(data) => { 
+              if(editingTask) { 
+                setTasks(prev => prev.map(t => t.id === editingTask.id ? {...editingTask, ...data} : t)); 
+                addToast('Cập nhật thành công'); 
+              } else { 
+                const newTask = {...data, id: crypto.randomUUID(), subtasks: []}; 
+                setTasks(prev => [newTask, ...prev]); 
+                addToast('Đã thêm nhiệm vụ'); 
+                addHistoryLog(newTask.id, newTask.title, 'create'); 
+              } 
+              setIsFormOpen(false); 
+            }} 
+            onClose={() => setIsFormOpen(false)} 
+          />
+        )}
         
         {isSyncModalOpen && <SyncHubModal tasks={tasks} onClose={() => setIsSyncModalOpen(false)} onImport={(code) => { try { const data = JSON.parse(atob(code)); setTasks(data); addToast('Đồng bộ thành công'); setIsSyncModalOpen(false); } catch(e) { addToast('Mã không hợp lệ', 'error'); } }} />}
 
-        {isNotifOpen && (
-           <NotificationPanel 
-             notifications={notifications} onClose={() => setIsNotifOpen(false)} onClearAll={() => setNotifications([])} 
-             onMarkAsRead={(id) => setNotifications(prev => prev.map(n => n.id === id ? {...n, isRead: true} : n))} 
-           />
-        )}
-
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-full max-w-[90vw] space-y-2 pointer-events-none">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] w-full max-w-[90vw] space-y-2 pointer-events-none">
           {toasts.map(toast => (
             <div key={toast.id} className={`px-5 py-3.5 rounded-2xl shadow-2xl text-white text-xs font-black uppercase tracking-tight animate-in slide-in-from-top duration-300 flex items-center justify-between gap-4 pointer-events-auto ${toast.type === 'error' ? 'bg-red-500' : 'bg-slate-900/90 backdrop-blur-md border border-white/10'}`}>
                <span className="flex items-center gap-2">
-                 {toast.type === 'success' ? '✨' : 'ℹ️'} {toast.message}
+                 {toast.type === 'success' ? '✨' : toast.type === 'info' ? 'ℹ️' : '⚠️'} {toast.message}
                </span>
                <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="opacity-50 hover:opacity-100">✕</button>
             </div>
@@ -370,7 +404,7 @@ const App: React.FC = () => {
   );
 };
 
-// Sub-components as defined in the previous working version
+// Sub-components
 interface TaskFormProps { task: Task | null; onSave: (data: any) => void; onClose: () => void; }
 const TaskForm: React.FC<TaskFormProps> = ({ task, onSave, onClose }) => {
   const [formData, setFormData] = useState({
@@ -378,24 +412,24 @@ const TaskForm: React.FC<TaskFormProps> = ({ task, onSave, onClose }) => {
     description: task?.description || '',
     priority: task?.priority || Priority.MEDIUM,
     status: task?.status || Status.TODO,
-    dueDate: task?.dueDate || new Date().toISOString().split('T')[0],
+    dueDate: task?.dueDate || getLocalDateString(),
     category: task?.category || CATEGORIES[0]
   });
   return (
-    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[200] flex items-end md:items-center justify-center p-0 md:p-4">
-      <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-t-[32px] md:rounded-[40px] shadow-2xl animate-in slide-in-from-bottom duration-300 overflow-hidden">
+    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[200] flex items-end md:items-center justify-center p-0 md:p-4 animate-in fade-in duration-300">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-t-[32px] md:rounded-[40px] shadow-2xl animate-in slide-in-from-bottom duration-500 overflow-hidden">
         <div className="p-8 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
           <h3 className="text-2xl font-black font-display tracking-tight">{task ? 'Cập nhật' : 'Nhiệm vụ mới'}</h3>
           <button onClick={onClose} className="w-10 h-10 flex items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 transition-colors">✕</button>
         </div>
         <form className="p-8 space-y-5" onSubmit={(e) => { e.preventDefault(); onSave(formData); }}>
           <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Tiêu đề công việc</label>
-            <input required className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 border-transparent focus:border-primary transition-all" placeholder="Nhập tiêu đề..." value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} />
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Tiêu đề</label>
+            <input required className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 border-transparent focus:border-primary transition-all" placeholder="Tên công việc..." value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} />
           </div>
           <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Mô tả chi tiết</label>
-            <textarea className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-medium outline-none h-28 resize-none" placeholder="Ghi chú thêm về công việc..." value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Ghi chú</label>
+            <textarea className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-medium outline-none h-28 resize-none" placeholder="Thêm mô tả..." value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
@@ -405,18 +439,11 @@ const TaskForm: React.FC<TaskFormProps> = ({ task, onSave, onClose }) => {
               </select>
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Danh mục</label>
-              <select className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-4 py-3.5 text-xs font-black uppercase tracking-tight" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Hạn chót</label>
+              <input type="date" className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-bold" value={formData.dueDate} onChange={e => setFormData({...formData, dueDate: e.target.value})} />
             </div>
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-1">Hạn hoàn thành</label>
-            <input type="date" className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl px-5 py-4 text-sm font-bold" value={formData.dueDate} onChange={e => setFormData({...formData, dueDate: e.target.value})} />
-          </div>
-          <button type="submit" className="w-full bg-primary text-white py-4.5 rounded-2xl font-black shadow-xl shadow-primary/30 mt-4 active:scale-95 transition-all uppercase tracking-widest">Lưu nhiệm vụ</button>
-          <div className="h-[var(--sab)] md:hidden" />
+          <button type="submit" className="w-full bg-primary text-white py-4.5 rounded-2xl font-black shadow-xl shadow-primary/30 mt-4 active:scale-95 transition-all uppercase tracking-widest">Lưu lại</button>
         </form>
       </div>
     </div>
@@ -430,21 +457,13 @@ const SyncHubModal: React.FC<SyncHubModalProps> = ({ tasks, onClose, onImport })
     <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[200] flex items-center justify-center p-4">
       <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-[40px] p-8 space-y-6 animate-in zoom-in-95">
         <div className="flex justify-between items-center">
-          <h3 className="text-2xl font-black font-display tracking-tight">Sync Hub 🔄</h3>
+          <h3 className="text-2xl font-black font-display tracking-tight">Đồng bộ 🔄</h3>
           <button onClick={onClose} className="w-8 h-8 flex items-center justify-center bg-slate-100 dark:bg-slate-800 rounded-full">✕</button>
         </div>
-        <div className="space-y-2">
-          <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] ml-1">Mã đồng bộ hiện tại</p>
-          <div className="p-5 bg-slate-100 dark:bg-slate-800 rounded-2xl text-[9px] break-all font-mono opacity-60 leading-relaxed border border-slate-200 dark:border-slate-700">
-            {btoa(JSON.stringify(tasks))}
-          </div>
-          <button onClick={() => { navigator.clipboard.writeText(btoa(JSON.stringify(tasks))); alert('Đã sao chép mã!'); }} className="text-[10px] font-bold text-primary ml-1 uppercase">Sao chép mã</button>
-        </div>
-        <div className="h-px bg-slate-100 dark:bg-slate-800" />
         <div className="space-y-4">
-          <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] ml-1">Nhập mã đồng bộ mới</p>
-          <textarea className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl p-5 text-xs font-mono min-h-[120px] outline-none focus:ring-2 focus:ring-primary/20 transition-all" placeholder="Dán mã tại đây..." value={code} onChange={e => setCode(e.target.value)} />
-          <button onClick={() => onImport(code)} className="w-full bg-primary text-white py-4.5 rounded-2xl font-black active:scale-95 transition-all uppercase tracking-widest shadow-lg shadow-primary/20">Bắt đầu đồng bộ</button>
+          <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] ml-1">Nhập mã đồng bộ</p>
+          <textarea className="w-full bg-slate-100 dark:bg-slate-800 rounded-2xl p-5 text-xs font-mono min-h-[120px] outline-none" value={code} onChange={e => setCode(e.target.value)} />
+          <button onClick={() => onImport(code)} className="w-full bg-primary text-white py-4.5 rounded-2xl font-black active:scale-95 transition-all uppercase tracking-widest shadow-lg shadow-primary/20">Xác nhận</button>
         </div>
       </div>
     </div>

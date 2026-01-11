@@ -7,6 +7,13 @@ interface CalendarViewProps {
   onEditTask: (task: Task) => void;
 }
 
+// Helper to get local YYYY-MM-DD string
+const getLocalDateString = (year: number, month: number, day: number) => {
+  const m = String(month + 1).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  return `${year}-${m}-${d}`;
+};
+
 const CalendarView: React.FC<CalendarViewProps> = ({ tasks, onEditTask }) => {
   const [currentDate, setCurrentDate] = useState(new Date());
 
@@ -60,8 +67,8 @@ const CalendarView: React.FC<CalendarViewProps> = ({ tasks, onEditTask }) => {
   const goToToday = () => setCurrentDate(new Date());
 
   const getTasksForDay = (day: number, month: number, year: number) => {
-    const targetDate = new Date(year, month, day).toISOString().split('T')[0];
-    return tasks.filter(t => t.dueDate === targetDate);
+    const targetDateStr = getLocalDateString(year, month, day);
+    return tasks.filter(t => t.dueDate === targetDateStr);
   };
 
   const getPriorityColor = (priority: Priority) => {
@@ -100,7 +107,8 @@ const CalendarView: React.FC<CalendarViewProps> = ({ tasks, onEditTask }) => {
       <div className="flex-1 grid grid-cols-7 grid-rows-6 min-h-0 overflow-y-auto custom-scrollbar">
         {daysInMonth.map((dayObj, i) => {
           const dayTasks = getTasksForDay(dayObj.day, dayObj.month, dayObj.year);
-          const isToday = new Date().toDateString() === new Date(dayObj.year, dayObj.month, dayObj.day).toDateString();
+          const today = new Date();
+          const isToday = dayObj.day === today.getDate() && dayObj.month === today.getMonth() && dayObj.year === today.getFullYear();
           
           return (
             <div 
